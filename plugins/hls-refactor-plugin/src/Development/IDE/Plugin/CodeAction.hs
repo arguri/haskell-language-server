@@ -1,6 +1,6 @@
 -- Copyright (c) 2019 The DAML Authors. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs     #-}
 
 module Development.IDE.Plugin.CodeAction
     (
@@ -68,15 +68,53 @@ import           Development.IDE.Plugin.TypeLenses                 (suggestSigna
 import           Development.IDE.Types.Exports
 import           Development.IDE.Types.Location
 import           Development.IDE.Types.Options
+import           GHC.Exts                                          (fromList)
+import qualified GHC.LanguageExtensions                            as Lang
+import           Ide.PluginUtils                                   (makeDiffTextEdit,
+                                                                    subRange)
+import           Ide.Types
+import qualified Language.LSP.Server                               as LSP
+import           Language.LSP.Types                                (ApplyWorkspaceEditParams (..),
+                                                                    CodeAction (..),
+                                                                    CodeActionContext (CodeActionContext, _diagnostics),
+                                                                    CodeActionKind (CodeActionQuickFix, CodeActionUnknown),
+                                                                    CodeActionParams (CodeActionParams),
+                                                                    Command,
+                                                                    Diagnostic (..),
+                                                                    List (..),
+                                                                    MessageType (..),
+                                                                    ResponseError,
+                                                                    SMethod (..),
+                                                                    ShowMessageParams (..),
+                                                                    TextDocumentIdentifier (TextDocumentIdentifier),
+                                                                    TextEdit (TextEdit, _range),
+                                                                    UInt,
+                                                                    WorkspaceEdit (WorkspaceEdit, _changeAnnotations, _changes, _documentChanges),
+                                                                    type (|?) (InR),
+                                                                    uriToFilePath)
+import           Language.LSP.VFS                                  (VirtualFile,
+                                                                    _file_text)
+import qualified Text.Fuzzy.Parallel                               as TFP
+import           Text.Regex.TDFA                                   (mrAfter,
+                                                                    (=~), (=~~))
+#if MIN_VERSION_ghc(9,2,1)
+import           GHC                                               (realSrcSpan)
+import           GHC.Parser.Annotation                             (emptyComments)
+import           GHC.Types.SrcLoc                                  (generatedSrcSpan)
+import           Language.Haskell.GHC.ExactPrint.Transform
+#endif
+#if MIN_VERSION_ghc(9,2,0)
+import           Control.Monad.Except                              (lift)
+import           Control.Monad.Identity                            (Identity (..))
+import           Extra                                             (maybeToEither)
 import           GHC                                               (AddEpAnn (AddEpAnn),
-                                                                    Anchor (anchor_op),
+                                                                    Anchor (..),
                                                                     AnchorOperation (..),
                                                                     AnnsModule (am_main),
                                                                     DeltaPos (..),
                                                                     EpAnn (..),
                                                                     EpaLocation (..),
                                                                     LEpaComment)
-import           GHC.Exts                                          (fromList)
 import qualified GHC.LanguageExtensions                            as Lang
 import           Ide.Logger                                        hiding
                                                                    (group)
@@ -107,6 +145,18 @@ import           Language.LSP.VFS                                  (VirtualFile,
 import qualified Text.Fuzzy.Parallel                               as TFP
 import qualified Text.Regex.Applicative                            as RE
 import           Text.Regex.TDFA                                   ((=~), (=~~))
+                                                                    LEpaComment,
+                                                                    LocatedA)
+import Debug.Trace
+import Control.Lens (bimap)
+
+#else
+import           Language.Haskell.GHC.ExactPrint.Types             (Annotation (annsDP),
+                                                                    DeltaPos,
+                                                                    KeywordId (G),
+                                                                    deltaRow,
+                                                                    mkAnnKey)
+#endif
 
 -------------------------------------------------------------------------------------------------
 
