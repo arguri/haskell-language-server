@@ -954,6 +954,112 @@ newDefinitionAction IdeOptions {..} parsedModule Range {_start} name typ
     sig = name <> colon <> T.dropWhileEnd isSpace (fromMaybe "_" typ)
     ParsedModule {pm_parsed_source = L _ HsModule {hsmodDecls}} = parsedModule
 
+
+type UndefinedVariableCodeAction = ParsedModule -> Diagnostic -> Either ResponseError [(T.Text, [TextEdit])]
+
+type UndefinedVariableHandler = ParsedModule -> Range -> T.Text -> Maybe T.Text -> Either ResponseError [(T.Text, [TextEdit])]
+
+-- When GHC tells us that a variable is not bound, it will tell us either:
+--  - there is an unbound variable with a given type
+--  - there is an unbound variable (GHC provides no type suggestion)
+--  - there is a typed hole `_`
+--
+-- When we receive either of these errors, we can produce a text edit that will put this variable in scope, such as:
+--  - Adding an argument binding
+--  - Adding a binding in a where clause
+--  - ... up to your creativity :)
+undefinedVariableCodeAction :: UndefinedVariableHandler -> UndefinedVariableCodeAction
+undefinedVariableCodeAction handler parsedModule Diagnostic {_message, _range}
+  | Just (name, typ) <- matchVariableNotInScope message = handler parsedModule _range name typ
+  | Just (name, typ) <- matchFoundHoleIncludeUnderscore message = handler parsedModule _range name (Just typ)
+  | otherwise = pure []
+  where
+    message = unifySpaces _message
+
+-- Handle unbound variables by adding a new argument as a new pattern in the last position of each LHS of the
+-- top-level bindings for this HsDecl.
+--
+-- TODO Include logic to also update the type signature of a binding
+--
+-- NOTE When adding a new argument to a declaration, the corresponding argument's type in declaration's signature might
+--      not be the last type in the signature, such as:
+--         foo :: a -> b -> c -> d
+--         foo a b = \c -> ...
+--      In this case a new argument would have to add its type between b and c in the signature.
+addAsLastArgument :: UndefinedVariableHandler
+addAsLastArgument (ParsedModule _ parsedSource _ _) range name _typ =
+  do
+    let addArgToMatch (L locMatch (Match xMatch ctxMatch pats rhs)) = do
+          let unqualName = mkRdrUnqual $ mkVarOcc $ T.unpack name
+          let newPat = L (noAnnSrcSpanDP1 generatedSrcSpan) $ VarPat NoExtField (noLocA unqualName)
+          pure $ L locMatch (Match xMatch ctxMatch (pats <> [newPat]) rhs)
+        insertArg = \case
+          (L locDecl (ValD xVal (FunBind xFunBind idFunBind mg coreFunBind))) -> do
+            mg' <- modifyMgMatchesT mg addArgToMatch
+            let decl' = L locDecl (ValD xVal (FunBind xFunBind idFunBind mg' coreFunBind))
+            pure [decl']
+          decl -> pure [decl]
+    case runTransformT $ modifySmallestDeclWithM (flip spanContainsRangeOrErr range) insertArg (makeDeltaAst parsedSource) of
+      Left err -> Left err
+      Right (newSource, _, _) ->
+        let diff = makeDiffTextEdit (T.pack $ exactPrint parsedSource) (T.pack $ exactPrint newSource)
+         in pure [("Add argument ‘" <> name <> "’ to function", fromLspList diff)]
+
+-- TODO use typ to initialise type signature
+addToWhere :: ParsedModule -> Range -> T.Text -> Maybe T.Text -> Either ResponseError [(T.Text, [TextEdit])]
+addToWhere (ParsedModule _ parsedSource _ _) range name _typ = bimap traceShowId id $ do
+  let mkUnqual name = noLocA $ mkRdrUnqual $ mkVarOcc $ T.unpack name
+      equalAnn dp = AddEpAnn AnnEqual (EpaDelta dp [])
+      addArg = modifySmallestDeclWithM (flip spanContainsRangeOrErr range) $ \case
+        (L locDecl (ValD xVal (FunBind xFunBind idFunBind mg coreFunBind))) -> do
+          declMatchSrcSpan <- uniqueSrcSpanT
+          grhsSrcSpan <- uniqueSrcSpanT
+          mg' <- modifyMgMatchesT mg $ \match -> do
+            spanInRange <- lift $ getLoc match `spanContainsRangeOrErr` range
+            if spanInRange
+              then do
+                let grhs_ann = GrhsAnn Nothing $ equalAnn (SameLine 0)
+                    rhs_hole = L (noAnnSrcSpanDP1 generatedSrcSpan) $ HsVar NoExtField (mkUnqual "_")
+                    grhs = GRHS (EpAnn (generatedAnchor m1) grhs_ann emptyComments) [] rhs_hole
+                    grhss = GRHSs emptyComments [L grhsSrcSpan grhs] (EmptyLocalBinds NoExtField)
+                    newDeclMatchAnn = emptyEpAnnAnchor (generatedAnchor m0)
+                    newDeclMatch =
+                      noLocA (Match newDeclMatchAnn (FunRhs (mkUnqual name) Prefix SrcStrict) [] grhss)
+                    newDeclMg = MG NoExtField (L (noAnnSrcSpanDP0 declMatchSrcSpan) [newDeclMatch]) Generated
+                    newDecl = (FunBind NoExtField (mkUnqual name) newDeclMg [])
+                prependDeclToWhereDecls match (noLocA newDecl)
+              else pure match
+          let decl' = L locDecl (ValD xVal (FunBind xFunBind idFunBind mg' coreFunBind))
+          pure [decl']
+        _ -> pure []
+  (newSource, _, _) <- runTransformT $ addArg (makeDeltaAst parsedSource)
+  let diffText = makeDiffTextEdit (T.pack $ exactPrint parsedSource) (T.pack $ exactPrint newSource)
+  pure [("Add to where ‘" <> name <> "’", fromLspList diffText)]
+
+spanContainsRangeOrErr :: SrcSpan -> Range -> Either ResponseError Bool
+spanContainsRangeOrErr srcSpan range = maybeToEither (responseError "SrcSpan was not valid range") . (`spanContainsRange` range) $ srcSpan
+
+generatedAnchor :: AnchorOperation -> Anchor
+generatedAnchor anchorOp = GHC.Anchor (GHC.realSrcSpan generatedSrcSpan) anchorOp
+
+emptyEpAnnAnchor :: Monoid a => Anchor -> EpAnn a
+emptyEpAnnAnchor anchor = EpAnn anchor mempty emptyComments
+
+fromLspList :: List a -> [a]
+fromLspList (List a) = a
+#endif
+
+suggestFillTypeWildcard :: Diagnostic -> [(T.Text, TextEdit)]
+suggestFillTypeWildcard Diagnostic{_range=_range,..}
+-- Foo.hs:3:8: error:
+--     * Found type wildcard `_' standing for `p -> p1 -> p'
+
+    | "Found type wildcard" `T.isInfixOf` _message
+    , " standing for " `T.isInfixOf` _message
+    , typeSignature <- extractWildCardTypeSignature _message
+        =  [("Use type signature: ‘" <> typeSignature <> "’", TextEdit _range typeSignature)]
+    | otherwise = []
+
 {- Handles two variants with different formatting
 
 1. Could not find module ‘Data.Cha’
