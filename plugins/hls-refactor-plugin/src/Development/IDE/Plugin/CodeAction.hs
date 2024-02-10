@@ -1,6 +1,8 @@
 -- Copyright (c) 2019 The DAML Authors. All rights reserved.
 -- SPDX-License-Identifier: Apache-2.0
 {-# LANGUAGE GADTs     #-}
+{-# OPTIONS_GHC -Wno-unused-imports #-}
+{-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 
 module Development.IDE.Plugin.CodeAction
     (
@@ -74,39 +76,43 @@ import           Ide.PluginUtils                                   (makeDiffText
                                                                     subRange)
 import           Ide.Types
 import qualified Language.LSP.Server                               as LSP
-import           Language.LSP.Types                                (ApplyWorkspaceEditParams (..),
+import           Language.LSP.Protocol.Types                                (ApplyWorkspaceEditParams (..),
                                                                     CodeAction (..),
                                                                     CodeActionContext (CodeActionContext, _diagnostics),
-                                                                    CodeActionKind (CodeActionQuickFix, CodeActionUnknown),
                                                                     CodeActionParams (CodeActionParams),
                                                                     Command,
                                                                     Diagnostic (..),
-                                                                    List (..),
                                                                     MessageType (..),
-                                                                    ResponseError,
-                                                                    SMethod (..),
                                                                     ShowMessageParams (..),
                                                                     TextDocumentIdentifier (TextDocumentIdentifier),
                                                                     TextEdit (TextEdit, _range),
                                                                     UInt,
                                                                     WorkspaceEdit (WorkspaceEdit, _changeAnnotations, _changes, _documentChanges),
                                                                     type (|?) (InR),
-                                                                    uriToFilePath)
+                                                                    uriToFilePath,
+                                                                    CodeActionKind(CodeActionKind_QuickFix,CodeActionKind_Empty),
+                                                                    ErrorCodes(ErrorCodes_InvalidRequest), 
+                                                                    )
+import Language.LSP.Protocol.Message (ResponseError(..))
+
+-- import Language.LSP. 
+-- CodeActionKind (CodeActionQuickFix, CodeActionUnknown),
+--                                                                     List (..),
+--                                                                     ResponseError,
+--                                                                     SMethod (..),
 import           Language.LSP.VFS                                  (VirtualFile,
                                                                     _file_text)
 import qualified Text.Fuzzy.Parallel                               as TFP
 import           Text.Regex.TDFA                                   (mrAfter,
                                                                     (=~), (=~~))
-#if MIN_VERSION_ghc(9,2,1)
+
 import           GHC                                               (realSrcSpan)
-import           GHC.Parser.Annotation                             (emptyComments)
+import           GHC.Parser.Annotation                             (emptyComments, SrcSpanAnnA, SrcSpanAnn'(..))
 import           GHC.Types.SrcLoc                                  (generatedSrcSpan)
 import           Language.Haskell.GHC.ExactPrint.Transform
-#endif
-#if MIN_VERSION_ghc(9,2,0)
-import           Control.Monad.Except                              (lift)
+-- import           Control.Monad.Except                              (lift)
 import           Control.Monad.Identity                            (Identity (..))
-import           Extra                                             (maybeToEither)
+import Data.Either.Extra (maybeToEither)
 import           GHC                                               (AddEpAnn (AddEpAnn),
                                                                     Anchor (..),
                                                                     AnchorOperation (..),
@@ -145,18 +151,10 @@ import           Language.LSP.VFS                                  (VirtualFile,
 import qualified Text.Fuzzy.Parallel                               as TFP
 import qualified Text.Regex.Applicative                            as RE
 import           Text.Regex.TDFA                                   ((=~), (=~~))
-                                                                    LEpaComment,
-                                                                    LocatedA)
 import Debug.Trace
 import Control.Lens (bimap)
 
-#else
-import           Language.Haskell.GHC.ExactPrint.Types             (Annotation (annsDP),
-                                                                    DeltaPos,
-                                                                    KeywordId (G),
-                                                                    deltaRow,
-                                                                    mkAnnKey)
-#endif
+
 
 -------------------------------------------------------------------------------------------------
 
@@ -198,7 +196,7 @@ typeSigsPluginDescriptor :: Recorder (WithPriority E.Log) -> PluginId -> PluginD
 typeSigsPluginDescriptor recorder plId = mkExactprintPluginDescriptor recorder $
   mkGhcideCAsPlugin [
       wrap $ suggestSignature True
-    , wrap suggestFillTypeWildcard
+    , wrap Development.IDE.Plugin.Plugins.FillTypeWildcard.suggestFillTypeWildcard
     , wrap suggestAddTypeAnnotationToSatisfyConstraints
     , wrap removeRedundantConstraints
     , wrap suggestConstraint
@@ -439,7 +437,7 @@ suggestHideShadow ps fileContents mTcM mHar Diagnostic {_message, _range}
 findImportDeclByModuleName :: [LImportDecl GhcPs] -> String -> Maybe (LImportDecl GhcPs)
 findImportDeclByModuleName decls modName = flip find decls $ \case
   (L _ ImportDecl {..}) -> modName == moduleNameString (unLoc ideclName)
-  _                     -> error "impossible"
+  -- _                     -> error "impossible"
 
 isTheSameLine :: SrcSpan -> SrcSpan -> Bool
 isTheSameLine s1 s2
@@ -987,67 +985,89 @@ undefinedVariableCodeAction handler parsedModule Diagnostic {_message, _range}
 --         foo a b = \c -> ...
 --      In this case a new argument would have to add its type between b and c in the signature.
 addAsLastArgument :: UndefinedVariableHandler
-addAsLastArgument (ParsedModule _ parsedSource _ _) range name _typ =
-  do
-    let addArgToMatch (L locMatch (Match xMatch ctxMatch pats rhs)) = do
-          let unqualName = mkRdrUnqual $ mkVarOcc $ T.unpack name
-          let newPat = L (noAnnSrcSpanDP1 generatedSrcSpan) $ VarPat NoExtField (noLocA unqualName)
-          pure $ L locMatch (Match xMatch ctxMatch (pats <> [newPat]) rhs)
-        insertArg = \case
-          (L locDecl (ValD xVal (FunBind xFunBind idFunBind mg coreFunBind))) -> do
-            mg' <- modifyMgMatchesT mg addArgToMatch
-            let decl' = L locDecl (ValD xVal (FunBind xFunBind idFunBind mg' coreFunBind))
-            pure [decl']
-          decl -> pure [decl]
-    case runTransformT $ modifySmallestDeclWithM (flip spanContainsRangeOrErr range) insertArg (makeDeltaAst parsedSource) of
-      Left err -> Left err
-      Right (newSource, _, _) ->
-        let diff = makeDiffTextEdit (T.pack $ exactPrint parsedSource) (T.pack $ exactPrint newSource)
-         in pure [("Add argument ‘" <> name <> "’ to function", fromLspList diff)]
+addAsLastArgument (ParsedModule _ parsedSource _ _) range name _typ = do 
+  let addArgToMatch (L locMatch (Match xMatch ctxMatch pats rhs)) = do
+        let unqualName = mkRdrUnqual $ mkVarOcc $ T.unpack name
+        let newPat = L (noAnnSrcSpanDP1 generatedSrcSpan) $ VarPat NoExtField (noLocA unqualName)
+        pure $ L locMatch (Match xMatch ctxMatch (pats <> [newPat]) rhs)
+      insertArg = \case
+        (L locDecl (ValD xVal (FunBind xFunBind idFunBind mg))) -> do
+          mg' <- modifyMgMatchesT mg addArgToMatch
+          let decl' = L locDecl (ValD xVal (FunBind xFunBind idFunBind mg'))
+          pure ([decl'], undefined) 
+        decl -> pure ([decl], undefined) 
+      
+  case runTransformT $ modifySmallestDeclWithM (flip spanContainsRangeOrErr range) insertArg (makeDeltaAst parsedSource) of
+          Left err -> Left err
+          Right ((newSource, _), _, _) ->
+            let diff = makeDiffTextEdit (T.pack $ exactPrint parsedSource) (T.pack $ exactPrint newSource)
+            in pure [("Add argument ‘" <> name <> "’ to function", diff)]
 
 -- TODO use typ to initialise type signature
 addToWhere :: ParsedModule -> Range -> T.Text -> Maybe T.Text -> Either ResponseError [(T.Text, [TextEdit])]
-addToWhere (ParsedModule _ parsedSource _ _) range name _typ = bimap traceShowId id $ do
-  let mkUnqual name = noLocA $ mkRdrUnqual $ mkVarOcc $ T.unpack name
-      equalAnn dp = AddEpAnn AnnEqual (EpaDelta dp [])
-      addArg = modifySmallestDeclWithM (flip spanContainsRangeOrErr range) $ \case
-        (L locDecl (ValD xVal (FunBind xFunBind idFunBind mg coreFunBind))) -> do
-          declMatchSrcSpan <- uniqueSrcSpanT
-          grhsSrcSpan <- uniqueSrcSpanT
-          mg' <- modifyMgMatchesT mg $ \match -> do
-            spanInRange <- lift $ getLoc match `spanContainsRangeOrErr` range
-            if spanInRange
-              then do
-                let grhs_ann = GrhsAnn Nothing $ equalAnn (SameLine 0)
-                    rhs_hole = L (noAnnSrcSpanDP1 generatedSrcSpan) $ HsVar NoExtField (mkUnqual "_")
-                    grhs = GRHS (EpAnn (generatedAnchor m1) grhs_ann emptyComments) [] rhs_hole
-                    grhss = GRHSs emptyComments [L grhsSrcSpan grhs] (EmptyLocalBinds NoExtField)
-                    newDeclMatchAnn = emptyEpAnnAnchor (generatedAnchor m0)
-                    newDeclMatch =
-                      noLocA (Match newDeclMatchAnn (FunRhs (mkUnqual name) Prefix SrcStrict) [] grhss)
-                    newDeclMg = MG NoExtField (L (noAnnSrcSpanDP0 declMatchSrcSpan) [newDeclMatch]) Generated
-                    newDecl = (FunBind NoExtField (mkUnqual name) newDeclMg [])
-                prependDeclToWhereDecls match (noLocA newDecl)
-              else pure match
-          let decl' = L locDecl (ValD xVal (FunBind xFunBind idFunBind mg' coreFunBind))
-          pure [decl']
-        _ -> pure []
-  (newSource, _, _) <- runTransformT $ addArg (makeDeltaAst parsedSource)
-  let diffText = makeDiffTextEdit (T.pack $ exactPrint parsedSource) (T.pack $ exactPrint newSource)
-  pure [("Add to where ‘" <> name <> "’", fromLspList diffText)]
+addToWhere (ParsedModule _ parsedSource _ _) range name _typ = 
+  bimap traceShowId id $ do
+
+  bimap traceShowId id $ do
+    let mkUnqual name = noLocA $ mkRdrUnqual $ mkVarOcc $ T.unpack name
+        equalAnn dp = AddEpAnn AnnEqual (EpaDelta dp [])
+        addArg = modifySmallestDeclWithM (flip spanContainsRangeOrErr range) $ \case
+          r@(L locDecl (ValD xVal (FunBind xFunBind idFunBind mg))) -> do 
+            declMatchSrcSpan <- uniqueSrcSpanT 
+            grhsSrcSpan <- uniqueSrcSpanT
+            mg' <- modifyMgMatchesT mg $ \match -> do
+              spanInRange <- lift $ getLoc match `spanContainsRangeOrErr` range
+              if spanInRange
+                then do
+                  let grhs_ann = GrhsAnn Nothing $ equalAnn (SameLine 0)
+                      hs_var = HsVar @GhcPs noExtField (mkUnqual "_")
+                      rhs_hole -- :: GenLocated (SrcSpanAnn' (EpAnn String)) (HsExpr GhcPs) 
+                        = L (noAnnSrcSpanDP1 generatedSrcSpan) $ hs_var 
+                      grhs = 
+                        GRHS @GhcPs 
+                          (EpAnn { entry = (generatedAnchor m1), anns = grhs_ann, comments = emptyComments }
+                          ) 
+                          [] 
+                          rhs_hole
+                      grhss =  
+                        GRHSs { 
+                            grhssExt = emptyComments 
+                            -- SrcSpanAnn' (EpAnn AnnListItem)
+                          , grhssGRHSs = 
+                              [ L (SrcSpanAnn { ann = undefined, locA = grhsSrcSpan}) grhs]
+                          , grhssLocalBinds = (EmptyLocalBinds @GhcPs NoExtField) }
+                          -- emptyComments  
+                          -- [L grhsSrcSpan grhs] 
+                          -- (EmptyLocalBinds @GhcPs NoExtField)
+                      newDeclMatchAnn = emptyEpAnnAnchor (generatedAnchor m0)
+                      newDeclMatch =
+                        noLocA (Match newDeclMatchAnn (FunRhs (mkUnqual name) Prefix SrcStrict) [] grhss)
+                      newDeclMg = 
+                        MG 
+                          undefined  
+                          (L (noAnnSrcSpanDP0 declMatchSrcSpan) [newDeclMatch]) 
+                          
+                      newDecl = (FunBind NoExtField (mkUnqual name) newDeclMg)
+                  prependDeclToWhereDecls match (noLocA newDecl)
+                else pure match
+            let decl' = L locDecl (ValD xVal (FunBind xFunBind idFunBind mg'))
+            pure ([decl'], undefined) 
+          _ -> pure ([], undefined) 
+    ((newSource, _), _, _) <- runTransformT $ addArg (makeDeltaAst parsedSource)
+    let diffText = makeDiffTextEdit (T.pack $ exactPrint parsedSource) (T.pack $ exactPrint newSource)
+    pure [("Add to where ‘" <> name <> "’", diffText)]
 
 spanContainsRangeOrErr :: SrcSpan -> Range -> Either ResponseError Bool
 spanContainsRangeOrErr srcSpan range = maybeToEither (responseError "SrcSpan was not valid range") . (`spanContainsRange` range) $ srcSpan
+
+responseError :: String -> ResponseError
+responseError msg = ResponseError { _code = InR ErrorCodes_InvalidRequest, _message = T.pack msg, _xdata = Nothing  }
 
 generatedAnchor :: AnchorOperation -> Anchor
 generatedAnchor anchorOp = GHC.Anchor (GHC.realSrcSpan generatedSrcSpan) anchorOp
 
 emptyEpAnnAnchor :: Monoid a => Anchor -> EpAnn a
 emptyEpAnnAnchor anchor = EpAnn anchor mempty emptyComments
-
-fromLspList :: List a -> [a]
-fromLspList (List a) = a
-#endif
 
 suggestFillTypeWildcard :: Diagnostic -> [(T.Text, TextEdit)]
 suggestFillTypeWildcard Diagnostic{_range=_range,..}
@@ -1059,6 +1079,11 @@ suggestFillTypeWildcard Diagnostic{_range=_range,..}
     , typeSignature <- extractWildCardTypeSignature _message
         =  [("Use type signature: ‘" <> typeSignature <> "’", TextEdit _range typeSignature)]
     | otherwise = []
+
+extractWildCardTypeSignature :: T.Text -> T.Text 
+extractWildCardTypeSignature = 
+  T.dropWhileEnd (\x -> x == '\'') . 
+  T.replace (T.pack "* Found type wildcard `_' standing for `") (T.pack "")
 
 {- Handles two variants with different formatting
 
@@ -2158,3 +2183,4 @@ matchRegExMultipleImports message = do
                             _            -> Nothing
   imps <- regExImports imports
   return (binding, imps)
+

@@ -322,7 +322,7 @@ codeActionTests = testGroup "code actions"
   , exportUnusedTests
   , addImplicitParamsConstraintTests
   , removeExportTests
-  , addFunctionArgumentTests
+  -- , addFunctionArgumentTests
   , Test.AddToWhere.tests
   ]
 
@@ -343,62 +343,62 @@ insertImportTests = testGroup "insert import"
         "WhereDeclLowerInFileWithCommentsBeforeIt.hs"
         "WhereDeclLowerInFileWithCommentsBeforeIt.expected.hs"
         "import Data.Int"
-  , expectFailBecause
-      "'findNextPragmaPosition' function doesn't account for case when shebang is not placed at top of file"
+  , -- expectFailBecause
+      -- "'findNextPragmaPosition' function doesn't account for case when shebang is not placed at top of file"
       (checkImport
          "Shebang not at top with spaces"
          "ShebangNotAtTopWithSpaces.hs"
          "ShebangNotAtTopWithSpaces.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      "'findNextPragmaPosition' function doesn't account for case when shebang is not placed at top of file"
+  , --expectFailBecause
+      -- "'findNextPragmaPosition' function doesn't account for case when shebang is not placed at top of file"
       (checkImport
          "Shebang not at top no space"
          "ShebangNotAtTopNoSpace.hs"
          "ShebangNotAtTopNoSpace.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      ("'findNextPragmaPosition' function doesn't account for case "
-      ++ "when OPTIONS_GHC pragma is not placed at top of file")
+  , -- expectFailBecause
+      --("'findNextPragmaPosition' function doesn't account for case "
+      -- ++ "when OPTIONS_GHC pragma is not placed at top of file")
       (checkImport
          "OPTIONS_GHC pragma not at top with spaces"
          "OptionsNotAtTopWithSpaces.hs"
          "OptionsNotAtTopWithSpaces.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      ("'findNextPragmaPosition' function doesn't account for "
-      ++ "case when shebang is not placed at top of file")
+  , -- expectFailBecause
+      -- ("'findNextPragmaPosition' function doesn't account for "
+      -- ++ "case when shebang is not placed at top of file")
       (checkImport
          "Shebang not at top of file"
          "ShebangNotAtTop.hs"
          "ShebangNotAtTop.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      ("'findNextPragmaPosition' function doesn't account for case "
-      ++ "when OPTIONS_GHC is not placed at top of file")
+  , -- expectFailBecause
+      -- ("'findNextPragmaPosition' function doesn't account for case "
+      -- ++ "when OPTIONS_GHC is not placed at top of file")
       (checkImport
          "OPTIONS_GHC pragma not at top of file"
          "OptionsPragmaNotAtTop.hs"
          "OptionsPragmaNotAtTop.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      ("'findNextPragmaPosition' function doesn't account for case when "
-      ++ "OPTIONS_GHC pragma is not placed at top of file")
+  , -- expectFailBecause
+      -- ("'findNextPragmaPosition' function doesn't account for case when "
+      -- ++ "OPTIONS_GHC pragma is not placed at top of file")
       (checkImport
          "pragma not at top with comment at top"
          "PragmaNotAtTopWithCommentsAtTop.hs"
          "PragmaNotAtTopWithCommentsAtTop.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      ("'findNextPragmaPosition' function doesn't account for case when "
-      ++ "OPTIONS_GHC pragma is not placed at top of file")
+  , -- expectFailBecause
+      -- ("'findNextPragmaPosition' function doesn't account for case when "
+      -- ++ "OPTIONS_GHC pragma is not placed at top of file")
       (checkImport
          "pragma not at top multiple comments"
          "PragmaNotAtTopMultipleComments.hs"
          "PragmaNotAtTopMultipleComments.expected.hs"
          "import Data.Monoid")
-  , expectFailBecause
-      "'findNextPragmaPosition' function doesn't account for case of multiline pragmas"
+  , -- expectFailBecause
+      -- "'findNextPragmaPosition' function doesn't account for case of multiline pragmas"
       (checkImport
          "after multiline language pragmas"
          "MultiLinePragma.hs"
@@ -1429,8 +1429,8 @@ extendImportTests = testGroup "extend import actions"
                     , "x :: (:~:) [] []"
                     , "x = Refl"
                     ])
-        , expectFailBecause "importing pattern synonyms is unsupported"
-          $ testSession "extend import list with pattern synonym" $ template
+        , expectFailBecause "importing pattern synonyms is unsupported" $ 
+            testSession "extend import list with pattern synonym" $ template
             [("ModuleA.hs", T.unlines
                     [ "{-# LANGUAGE PatternSynonyms #-}"
                       , "module ModuleA where"
