@@ -1738,6 +1738,66 @@ test-suite hls-refactor-plugin-tests
     , text
 
 -----------------------------
+-- complete case plugin
+-----------------------------
+
+flag completeCase
+  description: Enable Case Completion plugin
+  default:     True
+  manual:      True
+
+common completeCase
+  if flag(completeCase)
+    build-depends: haskell-language-server:hls-complete-case-plugin
+    cpp-options: -Dhls_completeCase
+
+library hls-complete-case-plugin
+  import:           defaults, warnings
+  exposed-modules:
+    Ide.Plugin.CompleteCase
+  other-modules:
+  hs-source-dirs: plugins/hls-complete-case-plugin/src
+  build-depends:
+    , base             >=4.12 && <5
+    , containers
+    , extra
+    , ghcide           == 2.6.0.0
+    , hls-plugin-api   == 2.6.0.0
+    , ghcide 
+    , deepseq
+    , hls-graph 
+    , bytestring 
+    , lens
+    , text 
+    , lsp
+    , mtl
+    , semigroupoids
+    , hashable 
+    , transformers
+    , vector
+
+-- test-suite hls-code-range-plugin-tests
+--   import:           defaults, test-defaults, warnings
+--   type:             exitcode-stdio-1.0
+--   hs-source-dirs:   plugins/hls-code-range-plugin/test
+--   main-is:          Main.hs
+--   other-modules:
+--     Ide.Plugin.CodeRangeTest
+--     Ide.Plugin.CodeRange.RulesTest
+--   build-depends:
+--     , base
+--     , bytestring
+--     , filepath
+--     , haskell-language-server:hls-code-range-plugin
+--     , hls-test-utils             == 2.6.0.0
+--     , lens
+--     , lsp
+--     , lsp-test
+--     , transformers
+--     , vector
+
+
+-----------------------------
 -- semantic tokens plugin
 -----------------------------
 
@@ -1901,6 +1961,7 @@ library
                   , alternateNumberFormat
                   , qualifyImportedNames
                   , codeRange
+                  , completeCase 
                   , gadt
                   , explicitFixity
                   , explicitFields
