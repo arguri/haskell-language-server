@@ -123,6 +123,10 @@ import qualified Development.IDE.Plugin.CodeAction as Refactor
 import qualified Ide.Plugin.SemanticTokens         as SemanticTokens
 #endif
 
+#if hls_completeCase
+import qualified Ide.Plugin.CompleteCase as CompleteCase 
+#endif 
+
 
 data Log = forall a. (Pretty a) => Log PluginId a
 
@@ -222,6 +226,9 @@ idePlugins recorder = pluginDescToIdePlugins allPlugins
       let pId = "ghcide-code-actions-fill-holes" in Refactor.fillHolePluginDescriptor (pluginRecorder pId) pId :
       let pId = "ghcide-extend-import-action" in Refactor.extendImportPluginDescriptor (pluginRecorder pId) pId :
 #endif
+#if hls_completeCase
+      let pId = "complete-case" in CompleteCase.descriptor (pluginRecorder pId) pId : 
+#endif 
 #if explicitFixity
       let pId = "explicit-fixity" in ExplicitFixity.descriptor (pluginRecorder pId) pId :
 #endif
